@@ -61,11 +61,14 @@ def create_app():
 
 @bp.route("/")
 async def index():
-    return await render_template(
+    html = await render_template(
         "index.html",
         title=app_settings.ui.title,
         favicon=app_settings.ui.favicon
     )
+    resp = await make_response(html)
+    ensure_cid_cookie(resp, request)
+    return resp
 
 
 @bp.route("/favicon.ico")
@@ -81,7 +84,6 @@ async def assets(path):
 async def upload():
     form = await request.form
     files = (await request.files).getlist("files[]")
-    conv_id = form.get("conversation_id", "default")
 
     if not files:
         return jsonify({"ok": False, "error": "No files uploaded"}), 400
@@ -95,11 +97,19 @@ async def upload():
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 400
 
+    # Prefer an explicit conversation_id if the client sends it; otherwise use cookie.
+    conv_id = form.get("conversation_id") or get_conv_id_from_request(request)
+
     merged = "\n\n".join(texts)
     prev = UPLOAD_CONTEXT.get(conv_id, "")
     combined = (prev + ("\n\n" if prev else "") + merged).strip()[:MAX_CONTEXT_CHARS]
     UPLOAD_CONTEXT[conv_id] = combined
-    return jsonify({"ok": True, "characters": len(combined)})
+
+    resp = jsonify({"ok": True, "characters": len(combined)})
+    # also ensure the session has a cid cookie for subsequent requests
+    ensure_cid_cookie(resp, request)
+    return resp
+
 
 
 
@@ -138,6 +148,19 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 
 azure_openai_tools = []
 azure_openai_available_tools = []
+
+# ---- per-session conversation id cookie ----
+CID_COOKIE = "cid"
+
+def get_conv_id_from_request(req):
+    """Read conversation id from cookie; fallback to 'default'."""
+    return req.cookies.get(CID_COOKIE) or "default"
+
+def ensure_cid_cookie(resp, req):
+    """Set a conversation id cookie if the client doesn't have one yet."""
+    if not req.cookies.get(CID_COOKIE):
+        resp.set_cookie(CID_COOKIE, str(uuid.uuid4()), httponly=True, samesite="Lax")
+
 
 # --- Uploaded docs context (per conversation) ---
 import io
@@ -495,8 +518,8 @@ async def send_chat_request(request_body, request_headers):
     request_body['messages'] = filtered_messages
     model_args = prepare_model_args(request_body, request_headers)
 
-    # Always include uploaded doc context
-    conv_id = request_body.get("conversation_id", "default")
+    # Always include uploaded doc context (prefer explicit id, else cookie)
+    conv_id = request_body.get("conversation_id") or get_conv_id_from_request(request)
     msgs = model_args.get("messages", [])
     model_args["messages"] = build_messages_with_upload_context(msgs, conv_id)
 
