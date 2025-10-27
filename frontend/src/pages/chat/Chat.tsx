@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useContext, useLayoutEffect } from 'react'
+import { useRef, useState, useEffect, useContext, useLayoutEffect, ChangeEvent } from 'react'
 import { CommandBarButton, IconButton, Dialog, DialogType, Stack } from '@fluentui/react'
 import { SquareRegular, ShieldLockRegular, ErrorCircleRegular } from '@fluentui/react-icons'
 
@@ -44,6 +44,58 @@ const enum messageStatus {
   Processing = 'Processing',
   Done = 'Done'
 }
+
+// --- inline upload widget (posts to /api/upload; cookie-based cid) ---
+function UploadWidgetInline() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [attached, setAttached] = useState(false);
+
+  async function onFilesPicked(e: ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    setBusy(true);
+    try {
+      const form = new FormData();
+      // backend reads cid cookie; no conversation_id needed
+      Array.from(files).forEach(f => form.append("files[]", f));
+
+      const res = await fetch("/api/upload", { method: "POST", body: form });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || "Upload failed");
+      setAttached(true);
+    } catch (err: any) {
+      alert(err?.message || "Upload failed");
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  }
+
+  return (
+    <Stack horizontal verticalAlign="center" tokens={{ childrenGap: 8 }}>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".txt,.pdf,.docx"
+        multiple
+        onChange={onFilesPicked}
+        style={{ display: "none" }}
+      />
+      <CommandBarButton
+        role="button"
+        iconProps={{ iconName: "Upload" }}
+        text={busy ? "Uploading…" : "Upload"}
+        onClick={() => inputRef.current?.click()}
+        disabled={busy}
+        aria-label="upload documents"
+      />
+      {attached && <span style={{ fontSize: 12 }}>docs attached</span>}
+    </Stack>
+  );
+}
+
 
 const Chat = () => {
   const appStateContext = useContext(AppStateContext)
@@ -931,6 +983,9 @@ const Chat = () => {
                   dialogContentProps={errorDialogContentProps}
                   modalProps={modalProps}></Dialog>
               </Stack>
+              {/* Upload button to attach docs as context */}
+              <UploadWidgetInline />
+              
               <QuestionInput
                 clearOnSend
                 placeholder="Type a new question..."
