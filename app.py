@@ -77,6 +77,31 @@ async def favicon():
 async def assets(path):
     return await send_from_directory("static/assets", path)
 
+@bp.route("/api/upload", methods=["POST"])
+async def upload():
+    form = await request.form
+    files = (await request.files).getlist("files[]")
+    conv_id = form.get("conversation_id", "default")
+
+    if not files:
+        return jsonify({"ok": False, "error": "No files uploaded"}), 400
+
+    texts = []
+    for f in files:
+        if _ext(f.filename) not in ALLOWED_EXT:
+            return jsonify({"ok": False, "error": f"Only {ALLOWED_EXT} allowed"}), 400
+        try:
+            texts.append(_extract_text(f))
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+    merged = "\n\n".join(texts)
+    prev = UPLOAD_CONTEXT.get(conv_id, "")
+    combined = (prev + ("\n\n" if prev else "") + merged).strip()[:MAX_CONTEXT_CHARS]
+    UPLOAD_CONTEXT[conv_id] = combined
+    return jsonify({"ok": True, "characters": len(combined)})
+
+
 
 # Debug settings
 DEBUG = os.environ.get("DEBUG", "false")
@@ -113,6 +138,48 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 
 azure_openai_tools = []
 azure_openai_available_tools = []
+
+# --- Uploaded docs context (per conversation) ---
+import io
+from pypdf import PdfReader
+import docx  # python-docx
+
+UPLOAD_CONTEXT: dict[str, str] = {}
+ALLOWED_EXT = {".txt", ".pdf", ".docx"}
+MAX_CONTEXT_CHARS = 50_000
+
+def _ext(name: str) -> str:
+    return os.path.splitext(name.lower())[1]
+
+def _extract_text(file_storage) -> str:
+    name = file_storage.filename or ""
+    ext = _ext(name)
+    data = file_storage.read()
+    if ext == ".txt":
+        return data.decode("utf-8", errors="ignore")
+    if ext == ".pdf":
+        reader = PdfReader(io.BytesIO(data))
+        return "\n".join((p.extract_text() or "") for p in reader.pages)
+    if ext == ".docx":
+        d = docx.Document(io.BytesIO(data))
+        return "\n".join(p.text for p in d.paragraphs)
+    raise ValueError(f"Unsupported file type: {ext}")
+
+def build_messages_with_upload_context(messages: list, conv_id: str) -> list:
+    ctx = UPLOAD_CONTEXT.get(conv_id)
+    if not ctx:
+        return messages
+    return [
+        {
+            "role": "system",
+            "content": (
+                "The user uploaded the following document text. "
+                "Use it as authoritative context when answering.\n\n" + ctx
+            ),
+        },
+        *messages,
+    ]
+
 
 # Initialize Azure OpenAI Client
 async def init_openai_client():
@@ -427,6 +494,12 @@ async def send_chat_request(request_body, request_headers):
             
     request_body['messages'] = filtered_messages
     model_args = prepare_model_args(request_body, request_headers)
+
+    # Always include uploaded doc context
+    conv_id = request_body.get("conversation_id", "default")
+    msgs = model_args.get("messages", [])
+    model_args["messages"] = build_messages_with_upload_context(msgs, conv_id)
+
 
     try:
         azure_openai_client = await init_openai_client()
